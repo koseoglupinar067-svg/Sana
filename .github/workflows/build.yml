@@ -1,0 +1,188 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # 1. Kaynak kodunu al
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Java 17
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # 3. Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 4. ZIP'i çıkart
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf extracted
+          mkdir -p extracted
+
+          ZIP=$(find . -maxdepth 2 -type f -iname "*.zip" \
+            ! -path "./extracted/*" | head -n 1)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: ZIP bulunamadı!"
+            exit 1
+          fi
+
+          echo "ZIP: $ZIP"
+
+          unzip -q "$ZIP" -d extracted
+
+          echo ""
+          echo "ZIP içeriği:"
+          find extracted -maxdepth 3 -type f | head -150
+
+      # 5. GERÇEK ana Gradle projesini bul
+      - name: Find Gradle Project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=""
+
+          echo "Gradle projeleri aranıyor..."
+
+          while IFS= read -r gradlew; do
+
+            DIR="$(dirname "$gradlew")"
+
+            echo "Kontrol ediliyor: $DIR"
+
+            # settings.gradle veya settings.gradle.kts olmalı
+            if [ ! -f "$DIR/settings.gradle" ] && \
+               [ ! -f "$DIR/settings.gradle.kts" ]; then
+              continue
+            fi
+
+            # Wrapper JAR gerçekten mevcut olmalı
+            if [ ! -f "$DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
+              echo "Wrapper JAR yok, geçiliyor: $DIR"
+              continue
+            fi
+
+            PROJECT_DIR="$DIR"
+            break
+
+          done < <(find extracted -type f -name "gradlew" | sort)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo ""
+            echo "ERROR: Geçerli Gradle projesi bulunamadı!"
+            echo ""
+            echo "Bulunan gradlew dosyaları:"
+            find extracted -type f -name "gradlew" -print
+            echo ""
+            echo "Bulunan wrapper JAR dosyaları:"
+            find extracted -type f -name "gradle-wrapper.jar" -print
+            exit 1
+          fi
+
+          echo ""
+          echo "================================"
+          echo "ANA PROJE:"
+          echo "$PROJECT_DIR"
+          echo "================================"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      # 6. Gradle Wrapper kontrolü
+      - name: Check Gradle
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "Project: $PWD"
+
+          echo ""
+          echo "Wrapper dosyaları:"
+          ls -la gradle/wrapper/
+
+          if [ ! -f "gradlew" ]; then
+            echo "ERROR: gradlew yok!"
+            exit 1
+          fi
+
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "ERROR: gradle-wrapper.jar yok!"
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+          ./gradlew --version
+
+      # 7. APK oluştur
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -e
+
+          chmod +x gradlew
+
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      # 8. APK'yı bul
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "APK aranıyor..."
+
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo ""
+            echo "ERROR: Debug APK bulunamadı!"
+            exit 1
+          fi
+
+          echo ""
+          echo "APK:"
+          echo "$APK"
+
+          echo "APK=$APK" >> "$GITHUB_ENV"
+
+      # 9. APK'yı Artifact olarak yükle
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoxNo-Client-Debug
+          path: ${{ env.APK }}
+          if-no-files-found: error
